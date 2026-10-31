@@ -114,4 +114,16 @@ final class CardURLTests: XCTestCase {
         XCTAssertFalse(Inngame.isSafeCardURL(URL(string: "javascript:alert(1)")!))
         XCTAssertFalse(Inngame.isSafeCardURL(URL(string: "file:///etc/passwd")!))
     }
+
+    func testChatThemeLogoAndColors() throws {
+        let c = try JSONDecoder().decode(InngameRemoteConfig.self, from: Data(##"{"photosEnabled":true,"verifiedOnly":false,"translation":true,"faq":false,"availability":null,"appearance":{"logoUrl":"https://inngame.gg/logos/app_1/abc.png","light":{"accent":"#ff5c8a","incoming":"#e3f4ff","outgoing":"#7a4a21","header":"bad"}}}"##.utf8))
+        let t = ChatTheme(appearance: c.appearance, dark: false)
+        XCTAssertEqual(t.logoURL?.absoluteString, "https://inngame.gg/logos/app_1/abc.png")
+        XCTAssertNil(t.header)
+        XCTAssertEqual(t.outgoingText, .white)
+        XCTAssertNotEqual(t.incomingText, .white)
+        let d = ChatTheme(appearance: JSONValue(["logoUrl": "javascript:alert(1)"] as [String: Any]), dark: true)
+        XCTAssertNil(d.logoURL)
+        XCTAssertEqual(d.outgoingText, .white)
+    }
 }

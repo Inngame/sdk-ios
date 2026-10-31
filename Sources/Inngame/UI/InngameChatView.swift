@@ -22,9 +22,25 @@ public struct InngameChatView: View {
     public init(showsCloseButton: Bool = true) { self.showsClose = showsCloseButton }
 
     private var appearance: JSONValue? { store.config?.appearance }
-    private var palette: JSONValue? { appearance?[scheme == .dark ? "dark" : "light"] }
-    private var accent: Color { Color(hex: palette?["accent"]?.string) ?? .accentColor }
+    private var theme: ChatTheme { ChatTheme(appearance: appearance, dark: scheme == .dark) }
+    private var accent: Color { theme.accent }
     private var title: String { appearance?["title"]?.string ?? L.t("Support") }
+
+    /// Title bar: the app's logo (dashboard → Appearance), the title and the usual reply time.
+    @ViewBuilder private var header: some View {
+        HStack(spacing: 8) {
+            if let url = theme.logoURL {
+                AsyncImage(url: url) { $0.resizable().scaledToFill() } placeholder: { Circle().fill(accent.opacity(0.3)) }
+                    .frame(width: 28, height: 28).clipShape(Circle())
+                    .accessibilityHidden(true)
+            }
+            VStack(spacing: 0) {
+                Text(title).font(.headline)
+                if let line = store.config?.availability?.text() { Text(line).font(.caption2).opacity(0.7) }
+            }
+        }
+        .foregroundStyle(theme.text ?? Color.primary)
+    }
 
     public var body: some View {
         NavigationStack {
@@ -44,19 +60,18 @@ public struct InngameChatView: View {
                     Text(L.t("You can't send messages.")).font(.footnote).foregroundStyle(.secondary).padding()
                 } else { composer }
             }
-            .background((Color(hex: palette?["background"]?.string) ?? Color.clear).ignoresSafeArea())
+            .background((theme.background ?? Color.clear).ignoresSafeArea())
             .navigationTitle(title)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
+            #if os(iOS)
+            .toolbarBackground(theme.header ?? Color.clear, for: .navigationBar)
+            .toolbarBackground(theme.header == nil ? .automatic : .visible, for: .navigationBar)
+            #endif
             .toolbar {
-                if let line = store.config?.availability?.text() {
-                    ToolbarItem(placement: .principal) {
-                        VStack(spacing: 0) {
-                            Text(title).font(.headline)
-                            Text(line).font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }
+                if theme.logoURL != nil || store.config?.availability?.text() != nil || theme.text != nil {
+                    ToolbarItem(placement: .principal) { header }
                 }
                 if showsClose {
                     ToolbarItem(placement: .cancellationAction) { Button(L.t("Close")) { dismiss() } }
@@ -112,13 +127,13 @@ public struct InngameChatView: View {
                         ProgressView().task { await store.loadOlder() }
                     }
                     ForEach(store.messages) { m in
-                        MessageRow(message: m, language: store.user?.language, accent: accent) { action in
+                        MessageRow(message: m, language: store.user?.language, theme: theme) { action in
                             if action.hasPrefix("rated:"), let score = Int(action.dropFirst(6)) { Task { await store.rate(m, score: score) } }
                             else { Task { await store.cardAction(m, action: action) } }
                         }.id(m.id)
                     }
                     ForEach(store.pending) { p in
-                        PendingRow(message: p, accent: accent) { Task { await store.retryPending() } }.id(p.id)
+                        PendingRow(message: p, theme: theme) { Task { await store.retryPending() } }.id(p.id)
                     }
                     if store.isTeamTyping {
                         HStack { TypingDots().padding(10).background(.quaternary, in: Capsule()); Spacer() }.id("typing")
@@ -198,7 +213,8 @@ public struct InngameChatView: View {
 struct MessageRow: View {
     let message: InngameMessage
     let language: String?
-    let accent: Color
+    let theme: ChatTheme
+    private var accent: Color { theme.accent }
     let onCard: (String) -> Void
     @Environment(\.openURL) private var openURL
 
@@ -222,8 +238,8 @@ struct MessageRow: View {
                         Text(text)
                             .textSelection(.enabled)
                             .padding(.horizontal, 12).padding(.vertical, 8)
-                            .foregroundStyle(mine ? Color.white : Color.primary)
-                            .background(mine ? accent : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 18))
+                            .foregroundStyle(mine ? theme.outgoingText : theme.incomingText)
+                            .background(mine ? theme.outgoing : theme.incoming, in: RoundedRectangle(cornerRadius: 18))
                     }
                     if let card = message.parsedCard { CardView(card: card, accent: accent, onAction: onCard) }
                 }
@@ -237,7 +253,7 @@ struct MessageRow: View {
 /// A message not yet accepted by the server: dimmed, with "Sending…" or a retry button.
 struct PendingRow: View {
     let message: InngamePendingMessage
-    let accent: Color
+    let theme: ChatTheme
     let onRetry: () -> Void
 
     var body: some View {
@@ -246,8 +262,8 @@ struct PendingRow: View {
             VStack(alignment: .trailing, spacing: 4) {
                 Text(message.body)
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .foregroundStyle(Color.white)
-                    .background(accent.opacity(message.failed ? 0.45 : 0.7), in: RoundedRectangle(cornerRadius: 18))
+                    .foregroundStyle(theme.outgoingText)
+                    .background(theme.outgoing.opacity(message.failed ? 0.45 : 0.7), in: RoundedRectangle(cornerRadius: 18))
                 if message.failed {
                     Button(L.t("Not sent · Tap to retry"), action: onRetry).font(.caption2).foregroundStyle(.red)
                 } else {
@@ -325,10 +341,51 @@ struct TypingDots: View {
 
 extension Color {
     init?(hex: String?) {
+        guard let (r, g, b) = Color.rgb(hex) else { return nil }
+        self.init(red: r, green: g, blue: b)
+    }
+
+    /// Composantes d'un "#RRGGBB" (0…1), nil sinon.
+    static func rgb(_ hex: String?) -> (Double, Double, Double)? {
         guard var s = hex?.trimmingCharacters(in: .whitespaces), s.hasPrefix("#") else { return nil }
         s.removeFirst()
         guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
-        self.init(red: Double((v >> 16) & 0xFF) / 255, green: Double((v >> 8) & 0xFF) / 255, blue: Double(v & 0xFF) / 255)
+        return (Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255)
+    }
+
+    /// Texte lisible sur ce fond : même seuil que les autres SDK (sombre sur clair, blanc sinon).
+    static func readable(on hex: String?) -> Color {
+        guard let (r, g, b) = rgb(hex) else { return .white }
+        return 0.299 * r + 0.587 * g + 0.114 * b > 0.6 ? Color(red: 0x1c / 255, green: 0x1c / 255, blue: 0x1f / 255) : .white
+    }
+}
+
+/// Couleurs et logo du chat (tableau de bord → Apparence). En-tête et bulles gardent l'aspect système tant que le studio ne les choisit pas.
+struct ChatTheme {
+    let accent: Color
+    let background: Color?
+    let text: Color?
+    let header: Color?
+    let incoming: Color
+    let incomingText: Color
+    let outgoing: Color
+    let outgoingText: Color
+    let logoURL: URL?
+
+    init(appearance: JSONValue?, dark: Bool) {
+        let p = appearance?[dark ? "dark" : "light"]
+        let hex = { (k: String) -> String? in p?[k]?.string.flatMap { Color.rgb($0) != nil ? $0 : nil } }
+        accent = Color(hex: hex("accent")) ?? .accentColor
+        background = Color(hex: hex("background"))
+        text = Color(hex: hex("text"))
+        header = Color(hex: hex("header"))
+        if let inc = hex("incoming") { incoming = Color(hex: inc)!; incomingText = Color.readable(on: inc) }
+        else { incoming = Color.secondary.opacity(0.15); incomingText = text ?? .primary }
+        let out = hex("outgoing") ?? hex("accent")
+        outgoing = Color(hex: out) ?? .accentColor
+        outgoingText = out.map { Color.readable(on: $0) } ?? .white
+        let logo = appearance?["logoUrl"]?.string.flatMap(URL.init(string:))
+        logoURL = logo?.scheme == "https" || logo?.scheme == "http" ? logo : nil
     }
 }
 

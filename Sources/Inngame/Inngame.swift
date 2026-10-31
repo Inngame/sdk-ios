@@ -15,7 +15,7 @@ import UIKit
 /// ```
 @MainActor
 public final class Inngame: ObservableObject {
-    public static let sdkVersion = "0.1.0"
+    public static let sdkVersion = "0.2.0"
     public static let shared = Inngame()
 
     @Published public private(set) var messages: [InngameMessage] = []
