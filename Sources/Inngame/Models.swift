@@ -189,4 +189,18 @@ public struct InngameError: Error, LocalizedError, Sendable {
     public let code: String
     public let message: String?
     public var errorDescription: String? { message ?? code }
+    /// The studio's support is unavailable (its Inngame workspace is suspended).
+    public var isSuspension: Bool { status == 403 && code == "org_suspended" }
+    static let suspended = InngameError(status: 403, code: "org_suspended", message: "Support is unavailable right now.")
+}
+
+/// When to ask the server again while support is unavailable: every 10 minutes while the chat is open,
+/// and when the chat opens (at most once a minute). Pure logic, unit-tested.
+struct SuspensionClock: Sendable {
+    static let recheckInterval: TimeInterval = 600
+    static let openGap: TimeInterval = 60
+    var lastCheck: Date = .distantPast
+
+    func recheckDue(now: Date, chatOpen: Bool) -> Bool { chatOpen && now.timeIntervalSince(lastCheck) >= Self.recheckInterval }
+    func recheckOnOpen(now: Date) -> Bool { now.timeIntervalSince(lastCheck) >= Self.openGap }
 }

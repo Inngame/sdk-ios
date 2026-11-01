@@ -3,7 +3,7 @@
 In-app support chat for regular iOS apps (SwiftUI or UIKit). Players write in their language; your team answers in theirs from the Inngame inbox, Telegram or Discord.
 
 ```swift
-// Package: https://github.com/inngame/sdk-ios (from 0.1.0) — iOS 16+
+// Package: https://github.com/inngame/sdk-ios (from 0.2.1) — iOS 16+
 import Inngame
 
 @main struct MyApp: App {
@@ -28,5 +28,7 @@ func application(_ app: UIApplication, didRegisterForRemoteNotificationsWithDevi
 ```
 
 Also: `Inngame.track("checkout_failed")` (automations can reply or open the chat), `Inngame.logout()`, `Inngame.shared.deleteMyData()`. Text messages written offline wait in `Inngame.shared.pending` and are sent when the network is back or at the next launch.
+
+Support unavailable (your Inngame workspace is suspended): `Inngame.isUnavailable` (published as `Inngame.shared.isUnavailable`) is `true`, the chat shows "Support is unavailable right now. Please try again later." without the composer, unsent messages wait in `pending`, and the SDK asks again every 10 minutes while the chat is open and each time it opens. It comes back on its own and sends the queue; `deleteMyData()` throws an `InngameError` whose `isSuspension` is `true` meanwhile.
 
 Tests: `swift test`; live test against a server with `INNGAME_TEST_URL=… INNGAME_TEST_APP_KEY=app_… swift test`.

@@ -55,10 +55,20 @@ public struct InngameChatView: View {
                     .background(Color.secondary.opacity(0.12))
                     .accessibilityElement(children: .combine)
                 }
-                if store.messages.isEmpty { welcome } else { thread }
-                if store.isBlocked {
-                    Text(L.t("You can't send messages.")).font(.footnote).foregroundStyle(.secondary).padding()
-                } else { composer }
+                if store.isUnavailable {
+                    // The studio's support is unavailable (workspace suspended): one clear line, no composer.
+                    Text(L.t("Support is unavailable right now. Please try again later."))
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                        .padding(32)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityAddTraits(.isStaticText)
+                } else {
+                    if store.messages.isEmpty { welcome } else { thread }
+                    if store.isBlocked {
+                        Text(L.t("You can't send messages.")).font(.footnote).foregroundStyle(.secondary).padding()
+                    } else { composer }
+                }
             }
             .background((theme.background ?? Color.clear).ignoresSafeArea())
             .navigationTitle(title)

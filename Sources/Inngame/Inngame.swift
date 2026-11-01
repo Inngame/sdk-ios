@@ -15,7 +15,7 @@ import UIKit
 /// ```
 @MainActor
 public final class Inngame: ObservableObject {
-    public static let sdkVersion = "0.2.0"
+    public static let sdkVersion = "0.2.1"
     public static let shared = Inngame()
 
     @Published public private(set) var messages: [InngameMessage] = []
@@ -26,7 +26,16 @@ public final class Inngame: ObservableObject {
     @Published public private(set) var isBlocked = false
     @Published public private(set) var hasMore = false
     @Published public private(set) var isReady = false
-    @Published public internal(set) var isChatVisible = false { didSet { if isChatVisible { Task { await markRead() } } } }
+    @Published public internal(set) var isChatVisible = false {
+        didSet {
+            guard isChatVisible else { return }
+            if isUnavailable { if suspension.recheckOnOpen(now: Date()) { recheck() } } else { Task { await markRead() } }
+        }
+    }
+    /// True while the studio's support is unavailable (its Inngame workspace is suspended): the chat says
+    /// "Support is unavailable right now. Please try again later.", hides the composer and keeps unsent messages.
+    /// The SDK asks again every 10 minutes while the chat is open and each time it opens, and comes back on its own.
+    @Published public private(set) var isUnavailable = false
     @Published public var lastError: String?
     /// Set when a push or an automation asks to open the chat; bind it to your sheet.
     @Published public var wantsToOpen = false
@@ -42,6 +51,8 @@ public final class Inngame: ObservableObject {
     private var pushToken: (String, String)?
     private var delivering = Set<String>()
     private var network: NWPathMonitor?
+    private var suspension = SuspensionClock()
+    private var recheckLoop: Task<Void, Never>?
 
     // MARK: - Static API
 
@@ -57,6 +68,8 @@ public final class Inngame: ObservableObject {
     }
     /// Inngame's purchase token for this user, as a UUID (nil before the first session).
     /// `product.purchase(options: [.appAccountToken(token)])` lets App Store notifications find the user.
+    /// True while the studio's support is unavailable (workspace suspended). See `Inngame.shared.isUnavailable`.
+    public static var isUnavailable: Bool { shared.isUnavailable }
     public static var purchaseToken: UUID? { shared.user?.purchaseToken.flatMap(UUID.init(uuidString:)) }
     /// The user signed out of your app: this device starts over as a new anonymous user.
     public static func logout() { Task { await shared.logout() } }
@@ -94,14 +107,22 @@ public final class Inngame: ObservableObject {
 
     func configure(appKey: String, baseURL: URL) {
         let saved = KeychainStore.get("token.\(appKey)") ?? KeychainStore.fallback("token.\(appKey)")
-        api = APIClient(baseURL: baseURL, appKey: appKey, token: saved)
+        configure(api: APIClient(baseURL: baseURL, appKey: appKey, token: saved))
+    }
+
+    /// Tests pass a client on a stubbed URLSession.
+    func configure(api client: APIClient, monitorNetwork: Bool = true) {
+        let appKey = client.appKey
+        api = client
+        client.onSuspended = { [weak self] on in Task { @MainActor in self?.setUnavailable(on) } }
         pending = Self.loadPending(appKey)
         startTask = Task { await start() }
+        guard monitorNetwork else { return }
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else { return }
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, !self.isUnavailable else { return } // support unavailable: the slow recheck asks again
                 // No session yet (first launch offline): open it now, which also sends the queue.
                 if self.api?.token == nil || !self.isReady { self.startTask = Task { await self.start() } } else { await self.retryPending() }
             }
@@ -129,10 +150,12 @@ public final class Inngame: ObservableObject {
 
     private func start() async {
         guard let api else { return }
+        let identity = pendingIdentity
         do {
             var body: [String: Any] = ["device": device()]
-            if let pendingIdentity { body["identity"] = pendingIdentity; self.pendingIdentity = nil }
+            if let identity { body["identity"] = identity; self.pendingIdentity = nil }
             let s: SessionResponse = try await api.request("POST", "/session", body: body)
+            setUnavailable(false)
             api.token = s.token
             KeychainStore.set("token.\(api.appKey)", s.token)
             user = s.user; unreadCount = s.unread; config = s.config; isBlocked = s.user.blocked ?? false
@@ -141,9 +164,42 @@ public final class Inngame: ObservableObject {
             await loadMessages()
             await sendPushToken()
             await retryPending()
+        } catch let e as InngameError where e.isSuspension {
+            if pendingIdentity == nil { pendingIdentity = identity } // sent with the session that works
+            setUnavailable(true)
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    // MARK: - Support unavailable (workspace suspended)
+
+    private func setUnavailable(_ on: Bool) {
+        api?.suspended = on
+        if on { suspension.lastCheck = Date() }
+        guard isUnavailable != on else { return }
+        isUnavailable = on
+        if on {
+            realtime?.stop()
+            isTeamTyping = false
+            for p in pending where p.failed { setFailed(p.clientId, false) } // waiting, not "not sent"
+            recheckLoop?.cancel()
+            recheckLoop = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 60_000_000_000)
+                    guard let self, !Task.isCancelled, self.isUnavailable else { return }
+                    if self.suspension.recheckDue(now: Date(), chatOpen: self.isChatVisible) { self.recheck() }
+                }
+            }
+        } else {
+            recheckLoop?.cancel(); recheckLoop = nil
+        }
+    }
+
+    /// Asks the server again with a new session; when it works, the chat comes back and the queue is sent.
+    func recheck() {
+        suspension.lastCheck = Date()
+        startTask = Task { await start() }
     }
 
     func identify(_ identity: [String: Any]) {
@@ -155,6 +211,8 @@ public final class Inngame: ObservableObject {
                 let r: IdentifyResponse = try await api.request("POST", "/identify", body: identity)
                 user = r.user; unreadCount = r.unread
                 await loadMessages()
+            } catch let e as InngameError where e.isSuspension {
+                pendingIdentity = identity // sent with the session that works once support is back
             } catch { lastError = error.localizedDescription }
         }
     }
@@ -169,6 +227,7 @@ public final class Inngame: ObservableObject {
 
     private func startRealtime() {
         realtime?.stop()
+        guard !isUnavailable else { return }
         let rt = Realtime(url: { [weak api] in api?.webSocketURL() }) { [weak self] ev in
             Task { @MainActor in self?.handle(ev) }
         }
@@ -212,6 +271,7 @@ public final class Inngame: ObservableObject {
         do {
             let r: MessagesResponse = try await api.request("GET", "/messages")
             messages = r.messages; hasMore = r.hasMore; unreadCount = r.unread
+        } catch let e as InngameError where e.isSuspension {
         } catch { lastError = error.localizedDescription }
     }
 
@@ -256,6 +316,7 @@ public final class Inngame: ObservableObject {
 
     /// Sends the queued messages again (also done at launch and when the network comes back).
     public func retryPending() async {
+        guard !isUnavailable else { return }
         // Already accepted (the reply was lost on the way back): it is in the history, not "not sent".
         let known = Set(messages.compactMap(\.clientId))
         if pending.contains(where: { known.contains($0.clientId) }) { pending.removeAll { known.contains($0.clientId) }; savePending() }
@@ -264,6 +325,7 @@ public final class Inngame: ObservableObject {
 
     private func deliver(_ p: InngamePendingMessage) async {
         guard let api, !delivering.contains(p.clientId), pending.contains(where: { $0.clientId == p.clientId }) else { return }
+        guard !isUnavailable else { return } // kept until support is back
         // No session yet: show the retry button; the queue leaves when the session opens.
         guard api.token != nil, isReady else { setFailed(p.clientId, true); return }
         delivering.insert(p.clientId)
@@ -278,6 +340,10 @@ public final class Inngame: ObservableObject {
             guard pending.contains(where: { $0.clientId == p.clientId }) else { return }
             pending.removeAll { $0.clientId == p.clientId }; savePending()
             insert(m)
+        } catch let e as InngameError where e.isSuspension {
+            // Support unavailable: the message is fine, it waits for support to come back.
+            setFailed(p.clientId, false)
+            setUnavailable(true)
         } catch let e as InngameError where Self.isPermanent(e.status) {
             // Refused by the server (blocked, too long…): sending it again would fail forever.
             pending.removeAll { $0.clientId == p.clientId }; savePending()
