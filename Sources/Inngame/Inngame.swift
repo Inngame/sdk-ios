@@ -15,7 +15,7 @@ import UIKit
 /// ```
 @MainActor
 public final class Inngame: ObservableObject {
-    public static let sdkVersion = "0.2.1"
+    public static let sdkVersion = "0.2.2"
     public static let shared = Inngame()
 
     @Published public private(set) var messages: [InngameMessage] = []
@@ -56,7 +56,7 @@ public final class Inngame: ObservableObject {
 
     // MARK: - Static API
 
-    public static func configure(appKey: String, baseURL: URL = URL(string: "https://inngame.meffysto.workers.dev")!) { shared.configure(appKey: appKey, baseURL: baseURL) }
+    public static func configure(appKey: String, baseURL: URL = URL(string: "https://app.inngame.app")!) { shared.configure(appKey: appKey, baseURL: baseURL) }
     /// Identify the signed-in user. Pass `token` (a JWT signed by your server with the app identity secret) to mark them verified.
     public static func identify(userId: String, name: String? = nil, email: String? = nil, token: String? = nil, metadata: [String: Any] = [:]) {
         var id: [String: Any] = ["userId": userId]

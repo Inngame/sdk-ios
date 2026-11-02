@@ -88,6 +88,19 @@ public struct InngameCard: Hashable, Sendable {
         self.label = v["label"]?.string
         self.url = v["url"]?.string.flatMap(URL.init(string:))
         self.raw = v
+        self.usesDefaultLabel = v["defaultLabel"] == .bool(true) || (label != nil && InngameCard.serverDefaultLabels[kind] == label)
+    }
+
+    /// True when the label is the server's own English default (`defaultLabel: true`, or a known default from before that flag):
+    /// the SDK then shows its translated text instead.
+    public let usesDefaultLabel: Bool
+    static let serverDefaultLabels = ["review": "Rate the game", "refund": "Request a refund"]
+    static let builtInLabels = ["review": "Rate the app", "refund": "Request a refund", "offer": "See the offer"]
+
+    /// The text of the card's button: the team's label, or the SDK's translated text for this kind of card.
+    func displayLabel(_ translate: (String) -> String = { L.t($0) }) -> String {
+        if let label, !label.isEmpty, !usesDefaultLabel { return label }
+        return translate(InngameCard.builtInLabels[kind] ?? "Open")
     }
 }
 

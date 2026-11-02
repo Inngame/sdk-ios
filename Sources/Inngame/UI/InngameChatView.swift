@@ -230,7 +230,13 @@ struct MessageRow: View {
 
     var body: some View {
         let mine = message.isFromPlayer
-        if message.authorType == .system {
+        if message.authorType == .system, let card = message.parsedCard {
+            // Cards the server sends on its own (satisfaction at close, then the store review): same place as the team's cards.
+            HStack {
+                CardView(card: card, accent: accent, onAction: onCard)
+                Spacer(minLength: 48)
+            }
+        } else if message.authorType == .system {
             Text(message.body).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
         } else {
             HStack {
@@ -304,14 +310,13 @@ struct CardView: View {
             default: if let url = card.url, Inngame.isSafeCardURL(url) { openURL(url) }
             }
         } label: {
-            Label(card.label ?? L.t(defaultLabel), systemImage: icon)
+            Label(card.displayLabel(), systemImage: icon)
                 .font(.callout.weight(.semibold))
                 .padding(.horizontal, 14).padding(.vertical, 10)
                 .background(accent.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
         }.buttonStyle(.plain)
     }
 
-    private var defaultLabel: String { ["review": "Rate the app", "refund": "Request a refund", "offer": "See the offer"][card.kind] ?? "Open" }
     private var icon: String { ["review": "star.fill", "refund": "arrow.uturn.backward", "offer": "gift.fill", "item": "gift.fill"][card.kind] ?? "arrow.up.right" }
 
     private func requestReview() {

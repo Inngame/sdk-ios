@@ -19,6 +19,23 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(m.author?.name, "Gab")
     }
 
+    func testServerDefaultCardLabelsAreTranslated() {
+        func card(_ json: String) -> InngameCard { InngameCard(try! JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))! }
+        let fr: (String) -> String = { L.t($0, lang: "fr-FR") }
+        // Refund sheet from the server (flag sent since 0.2.2 of the server) and the same card stored before the flag.
+        let refund = card(#"{"kind":"refund","label":"Request a refund","defaultLabel":true,"transactionId":"2000000123456789"}"#)
+        XCTAssertTrue(refund.usesDefaultLabel)
+        XCTAssertEqual(refund.displayLabel(fr), L.t("Request a refund", lang: "fr"))
+        XCTAssertNotEqual(refund.displayLabel(fr), "Request a refund")
+        XCTAssertEqual(card(#"{"kind":"refund","label":"Request a refund"}"#).displayLabel(fr), refund.displayLabel(fr))
+        let review = card(#"{"kind":"review","label":"Rate the game"}"#)
+        XCTAssertEqual(review.displayLabel(fr), L.t("Rate the app", lang: "fr"))
+        // A label written by the team stays as it is; no label → the SDK's text.
+        XCTAssertEqual(card(#"{"kind":"review","label":"Rate us"}"#).displayLabel(fr), "Rate us")
+        XCTAssertEqual(card(#"{"kind":"review"}"#).displayLabel(fr), L.t("Rate the app", lang: "fr"))
+        XCTAssertEqual(card(#"{"kind":"link","label":"Rate the game"}"#).displayLabel(fr), "Rate the game")
+    }
+
     func testPlayerMessageNeverTranslatedBack() throws {
         let m = try JSONDecoder().decode(InngameMessage.self, from: Data(json.replacingOccurrences(of: "\"team\"", with: "\"user\"").utf8))
         XCTAssertEqual(m.text(for: "fr"), "Try again after the update")

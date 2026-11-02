@@ -3,7 +3,7 @@
 In-app support chat for regular iOS apps (SwiftUI or UIKit). Players write in their language; your team answers in theirs from the Inngame inbox, Telegram or Discord.
 
 ```swift
-// Package: https://github.com/inngame/sdk-ios (from 0.2.1) — iOS 16+
+// Package: https://github.com/inngame/sdk-ios (from 0.2.2) — iOS 16+
 import Inngame
 
 @main struct MyApp: App {
