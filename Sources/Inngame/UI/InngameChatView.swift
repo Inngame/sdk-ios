@@ -233,7 +233,7 @@ struct MessageRow: View {
         if message.authorType == .system, let card = message.parsedCard {
             // Cards the server sends on its own (satisfaction at close, then the store review): same place as the team's cards.
             HStack {
-                CardView(card: card, accent: accent, onAction: onCard)
+                CardView(card: card, message: message, accent: accent, onAction: onCard)
                 Spacer(minLength: 48)
             }
         } else if message.authorType == .system {
@@ -257,7 +257,7 @@ struct MessageRow: View {
                             .foregroundStyle(mine ? theme.outgoingText : theme.incomingText)
                             .background(mine ? theme.outgoing : theme.incoming, in: RoundedRectangle(cornerRadius: 18))
                     }
-                    if let card = message.parsedCard { CardView(card: card, accent: accent, onAction: onCard) }
+                    if let card = message.parsedCard { CardView(card: card, message: message, accent: accent, onAction: onCard) }
                 }
                 if !mine { Spacer(minLength: 48) }
             }
@@ -293,49 +293,81 @@ struct PendingRow: View {
 
 struct CardView: View {
     let card: InngameCard
+    var message: InngameMessage? = nil
     let accent: Color
     let onAction: (String) -> Void
     @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var store = Inngame.shared
 
     var body: some View {
         if card.kind == "rating" { RatingView(card: card, accent: accent, onRate: { onAction("rated:\($0)") }) } else { button }
     }
 
+    private var claimed: Bool { card.kind == "item" && card.lastAction == "claimed" }
+    private var disabled: Bool { card.kind == "item" && (claimed || Inngame.onItemGranted == nil) }
+
+    private var title: String {
+        if card.kind == "item" {
+            if claimed { return L.t("Claimed") }
+            let it = message.flatMap { card.item(messageId: $0.id) }
+            let base = card.customLabel ?? L.t("Claim")
+            guard let it else { return base }
+            return "\(base) · \(it.name)\(it.quantity > 1 ? " ×\(it.quantity)" : "")"
+        }
+        return card.displayLabel()
+    }
+
     private var button: some View {
-        Button {
-            onAction("tapped")
-            switch card.kind {
-            case "review": requestReview()
-            case "refund": requestRefund()
-            default: if let url = card.url, Inngame.isSafeCardURL(url) { openURL(url) }
-            }
-        } label: {
-            Label(card.displayLabel(), systemImage: icon)
+        Button(action: tap) {
+            Label(title, systemImage: claimed ? "checkmark.circle.fill" : icon)
                 .font(.callout.weight(.semibold))
                 .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(accent.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
-        }.buttonStyle(.plain)
-    }
-
-    private var icon: String { ["review": "star.fill", "refund": "arrow.uturn.backward", "offer": "gift.fill", "item": "gift.fill"][card.kind] ?? "arrow.up.right" }
-
-    private func requestReview() {
-        #if os(iOS)
-        if let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene {
-            SKStoreReviewControllerShim.request(in: scene)
+                .background(accent.opacity(disabled ? 0.07 : 0.15), in: RoundedRectangle(cornerRadius: 12))
+                .opacity(disabled && !claimed ? 0.6 : 1)
         }
-        #endif
+        .buttonStyle(.plain)
+        .disabled(disabled)
     }
 
+    private var icon: String { ["review": "star.fill", "refund": "arrow.uturn.backward", "offer": "gift.fill", "item": "gift.fill", "restore": "arrow.clockwise", "screen": "arrow.right.circle"][card.kind] ?? "arrow.up.right" }
+
+    /// What each card does (same behavior as the Unity and web SDKs); every tap is reported to the team.
+    private func tap() {
+        switch card.kind {
+        case "review":
+            // The App Store "Write a Review" page, never the system rating prompt (Apple: not in response to a button).
+            if let url = card.reviewURL(storeIds: store.config?.reviews) { onAction("tapped"); openURL(url) } else { onAction("failed") }
+        case "refund":
+            requestRefund()
+        case "item":
+            guard let message else { return }
+            Task { await store.claimItem(message) }
+        case "offer":
+            guard let h = Inngame.onOffer else { onAction("failed"); return }
+            onAction("tapped"); dismiss(); h(card.offerId)
+        case "screen":
+            guard let h = Inngame.onScreen else { onAction("failed"); return }
+            onAction("tapped"); dismiss(); h(card.screen, card.value)
+        case "restore":
+            Task { onAction(await store.restorePurchases() ? "tapped" : "failed") }
+        default:
+            if let url = card.url, Inngame.isSafeCardURL(url) { onAction("tapped"); openURL(url) } else { onAction("failed") }
+        }
+    }
+
+    /// Apple's own refund sheet for the card's transaction (Apple decides); without a transaction id, Apple's "Report a Problem" page.
     private func requestRefund() {
         #if os(iOS)
-        guard let id = card.raw["transactionId"]?.string, let tx = UInt64(id) else { return }
-        Task { @MainActor in
-            if let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene {
-                let ok = await RefundShim.begin(transactionID: tx, in: scene)
-                onAction(ok ? "claimed" : "failed")
-            }
+        guard let id = card.transactionId, let tx = UInt64(id),
+              let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene else {
+            onAction("tapped"); openURL(Inngame.reportProblemURL); return
         }
+        Task { @MainActor in
+            onAction(await RefundShim.begin(transactionID: tx, in: scene))
+        }
+        #else
+        onAction("tapped"); openURL(Inngame.reportProblemURL)
         #endif
     }
 }

@@ -3,7 +3,7 @@
 In-app support chat for regular iOS apps (SwiftUI or UIKit). Players write in their language; your team answers in theirs from the Inngame inbox, Telegram or Discord.
 
 ```swift
-// Package: https://github.com/inngame/sdk-ios (from 0.2.2) — iOS 16+
+// Package: https://github.com/inngame/sdk-ios (from 0.2.3) — iOS 16+
 import Inngame
 
 @main struct MyApp: App {
@@ -26,6 +26,8 @@ Inngame.present(from: self)
 func application(_ app: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken token: Data) { Inngame.setPushToken(token) }
 // In your notification handler: if Inngame.handleNotification(userInfo) { /* open the chat; Inngame.shared.wantsToOpen is true */ }
 ```
+
+Cards: review cards open the App Store "Write a Review" page (never the system prompt), refund cards Apple's own refund sheet. Hook the ones that need your code at launch: `Inngame.onOffer = { id in … }`, `Inngame.onScreen = { screen, value in … }`, `Inngame.onItemGranted = { item in … }` (credit it on your server from the `item.claimed` webhook), `Inngame.onRestorePurchases` (default: `AppStore.sync()`).
 
 Also: `Inngame.track("checkout_failed")` (automations can reply or open the chat), `Inngame.logout()`, `Inngame.shared.deleteMyData()`. Text messages written offline wait in `Inngame.shared.pending` and are sent when the network is back or at the next launch.
 

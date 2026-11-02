@@ -2,16 +2,15 @@
 import StoreKit
 import UIKit
 
-enum SKStoreReviewControllerShim {
-    @MainActor static func request(in scene: UIWindowScene) {
-        if #available(iOS 18.0, *) { AppStore.requestReview(in: scene) } else { SKStoreReviewController.requestReview(in: scene) }
-    }
-}
-
 enum RefundShim {
-    /// Apple's own refund sheet: Apple decides, not the app.
-    @MainActor static func begin(transactionID: UInt64, in scene: UIWindowScene) async -> Bool {
-        (try? await Transaction.beginRefundRequest(for: transactionID, in: scene)) == .success
+    /// Apple's own refund sheet: Apple decides, not the app. Returns the action reported to the team:
+    /// "claimed" (request submitted), "dismissed" (the user cancelled) or "failed".
+    @MainActor static func begin(transactionID: UInt64, in scene: UIWindowScene) async -> String {
+        switch try? await Transaction.beginRefundRequest(for: transactionID, in: scene) {
+        case .success?: return "claimed"
+        case .userCancelled?: return "dismissed"
+        default: return "failed"
+        }
     }
 }
 #endif

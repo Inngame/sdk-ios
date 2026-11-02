@@ -78,7 +78,7 @@ struct UploadedAttachment: Codable, Sendable {
 }
 
 public struct InngameCard: Hashable, Sendable {
-    public let kind: String           // review, link, offer, screen, item, refund
+    public let kind: String           // review, link, offer, screen, item, refund, restore, rating
     public let label: String?
     public let url: URL?
     public let raw: JSONValue
@@ -95,7 +95,34 @@ public struct InngameCard: Hashable, Sendable {
     /// the SDK then shows its translated text instead.
     public let usesDefaultLabel: Bool
     static let serverDefaultLabels = ["review": "Rate the game", "refund": "Request a refund"]
-    static let builtInLabels = ["review": "Rate the app", "refund": "Request a refund", "offer": "See the offer"]
+    static let builtInLabels = ["review": "Rate the app", "refund": "Request a refund", "offer": "See the offer", "item": "Claim"]
+
+    /// The team's own label, or nil when the SDK shows its translated text.
+    public var customLabel: String? { (label?.isEmpty == false && !usesDefaultLabel) ? label : nil }
+    /// Screen cards: the screen id and its value. Offer cards: `offerId` (or `value`).
+    public var screen: String? { raw["screen"]?.string }
+    public var value: String? { raw["value"]?.string }
+    public var offerId: String? { raw["offerId"]?.string ?? raw["value"]?.string }
+    /// Refund cards: the App Store transaction id.
+    public var transactionId: String? { raw["transactionId"]?.string }
+    /// The last action reported for this card ("tapped", "claimed", "failed"…).
+    public var lastAction: String? { raw["lastAction"]?.string }
+    /// Item cards: the item (nil for other cards).
+    public func item(messageId: String) -> InngameItem? {
+        guard kind == "item", let it = raw["item"], let id = it["id"]?.string else { return nil }
+        let q: Int
+        switch it["quantity"] { case .number(let n)?: q = max(1, Int(n)); default: q = 1 }
+        return InngameItem(messageId: messageId, id: id, name: it["name"]?.string ?? id, quantity: q)
+    }
+
+    /// App Store "Write a Review" page for this app (the card's id, else the dashboard's). Never the system rating prompt:
+    /// Apple advises against showing it in response to a button.
+    func reviewURL(storeIds: InngameStoreIds?) -> URL? {
+        if let id = raw["appStoreId"]?.string ?? storeIds?.appStoreId, !id.isEmpty, id.allSatisfy(\.isNumber) {
+            return URL(string: "https://apps.apple.com/app/id\(id)?action=write-review")
+        }
+        return url.flatMap { Inngame.isSafeCardURL($0) ? $0 : nil }
+    }
 
     /// The text of the card's button: the team's label, or the SDK's translated text for this kind of card.
     func displayLabel(_ translate: (String) -> String = { L.t($0) }) -> String {
@@ -116,7 +143,7 @@ public struct InngameMessage: Codable, Identifiable, Hashable, Sendable {
     public let lang: String?
     public let translations: [String: String]?
     public let attachments: [InngameAttachment]
-    let card: JSONValue?
+    var card: JSONValue?
     public let status: String
     public let createdAt: Double
     public let readAt: Double?
@@ -149,6 +176,23 @@ public struct InngameRemoteConfig: Codable, Sendable {
     public let faq: Bool
     /// Whether the team is around and how fast it usually replies (nil on older servers).
     public let availability: InngameAvailability?
+    /// Store ids from the dashboard (Settings → Apps → Reviews), used by review cards that don't carry their own.
+    public let reviews: InngameStoreIds?
+}
+
+public struct InngameStoreIds: Codable, Sendable, Equatable {
+    public let appStoreId: String?
+    public let playPackage: String?
+    public let steamAppId: String?
+}
+
+/// A compensation item from an "item" card, given to `Inngame.onItemGranted` once the server confirms the claim.
+public struct InngameItem: Hashable, Sendable {
+    /// The message that carried the card.
+    public let messageId: String
+    public let id: String
+    public let name: String
+    public let quantity: Int
 }
 
 public struct InngameAvailability: Codable, Sendable, Equatable {
@@ -186,6 +230,7 @@ struct UploadResponse: Codable { let attachment: UploadedAttachment; let url: UR
 struct UnreadResponse: Codable { let unread: Int }
 struct FaqResponse: Codable { let articles: [InngameArticle] }
 struct EventResponse: Codable { let ok: Bool; let openChat: Bool? }
+struct ClaimResponse: Codable { let ok: Bool?; let granted: Bool? }
 
 /// A message written on this device that the server hasn't accepted yet.
 public struct InngamePendingMessage: Codable, Identifiable, Hashable, Sendable {

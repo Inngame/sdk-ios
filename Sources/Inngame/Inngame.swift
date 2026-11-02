@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import StoreKit
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
@@ -15,7 +16,7 @@ import UIKit
 /// ```
 @MainActor
 public final class Inngame: ObservableObject {
-    public static let sdkVersion = "0.2.2"
+    public static let sdkVersion = "0.2.3"
     public static let shared = Inngame()
 
     @Published public private(set) var messages: [InngameMessage] = []
@@ -53,6 +54,19 @@ public final class Inngame: ObservableObject {
     private var network: NWPathMonitor?
     private var suspension = SuspensionClock()
     private var recheckLoop: Task<Void, Never>?
+
+    // MARK: - Card handlers
+
+    /// "offer" card tapped: the chat closes, then show your paywall or store page for this offer id.
+    /// Without a handler the tap is reported to your team as failed.
+    public static var onOffer: ((_ offerId: String?) -> Void)?
+    /// "screen" card tapped: the chat closes, then navigate to this screen of your app (the card's screen id and value).
+    public static var onScreen: ((_ screen: String?, _ value: String?) -> Void)?
+    /// "restore" card tapped. Default (nil): StoreKit's `AppStore.sync()`. Set it to use your IAP library instead.
+    public static var onRestorePurchases: (() -> Void)?
+    /// "item" card claimed and confirmed by the server (once per card, even with several devices): refresh your UI.
+    /// Credit the user on your server from the `item.claimed` webhook. Without a handler, item cards stay disabled.
+    public static var onItemGranted: ((InngameItem) -> Void)?
 
     // MARK: - Static API
 
@@ -95,6 +109,9 @@ public final class Inngame: ObservableObject {
         vc.present(host, animated: true)
     }
     #endif
+
+    /// Apple's page to request a refund or report a problem with a purchase.
+    nonisolated static let reportProblemURL = URL(string: "https://reportaproblem.apple.com/")!
 
     /// Card links: http(s) or an app deep link, never javascript:, data:, file:…
     nonisolated static func isSafeCardURL(_ url: URL) -> Bool {
@@ -310,7 +327,8 @@ public final class Inngame: ObservableObject {
             var m = r.message; m.clientId = clientId
             insert(m)
         } catch let e as InngameError {
-            lastError = e.code == "photo_rejected" ? "This image can't be sent." : (e.message ?? e.code)
+            // The server's message is already in the user's language ("This image can't be sent.", translated).
+            lastError = e.message ?? (e.code == "photo_rejected" ? "This image can't be sent." : e.code)
         } catch { lastError = error.localizedDescription }
     }
 
@@ -383,7 +401,51 @@ public final class Inngame: ObservableObject {
 
     public func cardAction(_ message: InngameMessage, action: String) async {
         guard let api else { return }
+        setLastAction(message.id, action)
         _ = try? await api.request("POST", "/cards/\(message.id)/action", body: ["action": action]) as [String: Bool]
+    }
+
+    /// Shows the card's new state right away (claimed, failed…).
+    private func setLastAction(_ messageId: String, _ action: String, extra: [String: JSONValue] = [:]) {
+        guard let i = messages.firstIndex(where: { $0.id == messageId }), case .object(var o)? = messages[i].card else { return }
+        o["lastAction"] = .string(action)
+        for (k, v) in extra { o[k] = v }
+        messages[i].card = .object(o)
+    }
+
+    private var claiming = Set<String>()
+
+    /// "item" card: the item is granted only once the server confirms this device won the claim (the team may have
+    /// unsent it, or another device claimed it). The nonce is kept, so a retry after a lost response still grants.
+    /// Returns true when `onItemGranted` was called.
+    @discardableResult public func claimItem(_ message: InngameMessage) async -> Bool {
+        guard let api, let item = message.parsedCard?.item(messageId: message.id), message.parsedCard?.lastAction != "claimed",
+              let grant = Inngame.onItemGranted, !claiming.contains(message.id) else { return false }
+        claiming.insert(message.id); defer { claiming.remove(message.id) }
+        let key = "inngame.claim.\(message.id)"
+        let nonce = UserDefaults.standard.string(forKey: key) ?? UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        UserDefaults.standard.set(nonce, forKey: key)
+        do {
+            let r: ClaimResponse = try await api.request("POST", "/cards/\(message.id)/action", body: ["action": "claimed", "nonce": nonce])
+            setLastAction(message.id, "claimed")
+            UserDefaults.standard.removeObject(forKey: key)
+            if r.granted == true { grant(item); return true }
+        } catch let e as InngameError where e.status == 404 {
+            // Unsent by the team: never granted.
+            messages.removeAll { $0.id == message.id }
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {}
+        return false
+    }
+
+    /// "restore" card: the app's handler, or StoreKit's `AppStore.sync()`. Returns false if it failed.
+    func restorePurchases() async -> Bool {
+        if let h = Inngame.onRestorePurchases { h(); return true }
+        #if os(iOS) || os(macOS)
+        do { try await AppStore.sync(); return true } catch { return false }
+        #else
+        return false
+        #endif
     }
 
     /// Satisfaction card ("rating"): sends the user's score from 1 to 5. The server keeps the first score only.

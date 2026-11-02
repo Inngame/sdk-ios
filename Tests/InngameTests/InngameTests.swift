@@ -125,6 +125,37 @@ final class PendingLiveTests: XCTestCase {
 }
 
 final class CardURLTests: XCTestCase {
+    private func card(_ json: String) -> InngameCard { InngameCard(try! JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))! }
+
+    /// Review cards open the App Store "Write a Review" page (never the system prompt), from the card's id or the dashboard's.
+    func testReviewCardOpensWriteReviewPage() throws {
+        let ids = try JSONDecoder().decode(InngameStoreIds.self, from: Data(#"{"appStoreId":"6820303869","playPackage":null,"steamAppId":null}"#.utf8))
+        XCTAssertEqual(card(#"{"kind":"review","defaultLabel":true,"source":"resolved"}"#).reviewURL(storeIds: ids)?.absoluteString,
+                       "https://apps.apple.com/app/id6820303869?action=write-review")
+        XCTAssertEqual(card(#"{"kind":"review","appStoreId":"123"}"#).reviewURL(storeIds: ids)?.absoluteString, "https://apps.apple.com/app/id123?action=write-review")
+        XCTAssertEqual(card(#"{"kind":"review","url":"https://example.com/r"}"#).reviewURL(storeIds: nil)?.absoluteString, "https://example.com/r")
+        XCTAssertNil(card(#"{"kind":"review","url":"javascript:alert(1)"}"#).reviewURL(storeIds: nil))
+        XCTAssertNil(card(#"{"kind":"review","appStoreId":"12; rm"}"#).reviewURL(storeIds: nil))
+        let cfg = try JSONDecoder().decode(InngameRemoteConfig.self, from: Data(#"{"photosEnabled":true,"verifiedOnly":false,"translation":true,"faq":false,"reviews":{"appStoreId":"42","playPackage":"a.b","steamAppId":null}}"#.utf8))
+        XCTAssertEqual(cfg.reviews?.appStoreId, "42")
+    }
+
+    func testItemOfferScreenRefundFields() {
+        let item = card(#"{"kind":"item","label":"Sorry!","item":{"id":"gems","name":"Gems","quantity":50}}"#)
+        XCTAssertEqual(item.item(messageId: "msg_9"), InngameItem(messageId: "msg_9", id: "gems", name: "Gems", quantity: 50))
+        XCTAssertEqual(item.customLabel, "Sorry!")
+        XCTAssertNil(card(#"{"kind":"link","item":{"id":"x"}}"#).item(messageId: "m"))
+        XCTAssertEqual(card(#"{"kind":"item"}"#).displayLabel { $0 }, "Claim")
+        XCTAssertEqual(card(#"{"kind":"offer","offerId":"spring"}"#).offerId, "spring")
+        XCTAssertEqual(card(#"{"kind":"offer","value":"v"}"#).offerId, "v")
+        let screen = card(#"{"kind":"screen","screen":"shop","value":"gems"}"#)
+        XCTAssertEqual(screen.screen, "shop"); XCTAssertEqual(screen.value, "gems")
+        XCTAssertEqual(card(#"{"kind":"refund","transactionId":"2000000123456789"}"#).transactionId, "2000000123456789")
+        XCTAssertEqual(card(#"{"kind":"item","lastAction":"claimed"}"#).lastAction, "claimed")
+        XCTAssertEqual(Inngame.reportProblemURL.host, "reportaproblem.apple.com")
+        for (lang, t) in L.table { XCTAssertNotNil(t["Claim"], lang); XCTAssertNotNil(t["Claimed"], lang) }
+    }
+
     func testOnlyWebLinksAndDeepLinksOpen() {
         XCTAssertTrue(Inngame.isSafeCardURL(URL(string: "https://example.com")!))
         XCTAssertTrue(Inngame.isSafeCardURL(URL(string: "myapp://screen/shop")!))
@@ -249,5 +280,65 @@ final class SuspensionTests: XCTestCase {
         XCTAssertEqual(sdk.messages.first?.body, "help")
         XCTAssertEqual((SuspendedServer.sessionBodies.first?["identity"] as? [String: Any])?["userId"] as? String, "p1", "identity kept for the session that works")
         sdk.isChatVisible = false
+    }
+}
+
+/// Fake server for item claims and refused photos.
+final class CardServer: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var claims: [String] = []
+    static let lock = NSLock()
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() {}
+    override func startLoading() {
+        let path = request.url!.path.replacingOccurrences(of: "/v1/sdk", with: "")
+        var body: [String: Any] = [:]
+        if let s = request.httpBodyStream {
+            s.open(); var d = Data(); var buf = [UInt8](repeating: 0, count: 4096)
+            while s.hasBytesAvailable { let n = s.read(&buf, maxLength: buf.count); if n <= 0 { break }; d.append(buf, count: n) }
+            s.close()
+            body = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]
+        }
+        let (status, json): (Int, String)
+        switch path {
+        case "/session": (status, json) = (200, #"{"token":"dev_t","user":{"id":"eu_1","blocked":false},"conversationId":"cnv_1","unread":0,"config":{"photosEnabled":true,"verifiedOnly":false,"translation":true,"faq":false}}"#)
+        case "/messages": (status, json) = (200, #"{"conversationId":"cnv_1","messages":[{"id":"msg_item","conversationId":"cnv_1","seq":1,"authorType":"team","body":"Sorry!","attachments":[],"card":{"kind":"item","item":{"id":"gems","name":"Gems","quantity":50}},"status":"sent","createdAt":1}],"hasMore":false,"unread":0}"#)
+        case "/cards/msg_item/action":
+            Self.lock.lock(); Self.claims.append(body["nonce"] as? String ?? ""); let first = Self.claims.count == 1; Self.lock.unlock()
+            (status, json) = (200, first ? #"{"ok":true,"granted":true}"# : #"{"ok":true,"granted":false}"#)
+        case "/uploads": (status, json) = (422, #"{"error":"photo_rejected","message":"Cette image ne peut pas être envoyée."}"#)
+        default: (status, json) = (200, #"{"ok":true}"#)
+        }
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["content-type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(json.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+@MainActor
+final class CardActionTests: XCTestCase {
+    func testItemClaimedOnceAndPhotoErrorFromServer() async throws {
+        let key = "app_card_test"
+        defer { KeychainStore.set("token.\(key)", nil); UserDefaults.standard.removeObject(forKey: "gg.inngame.token.\(key)"); Inngame.onItemGranted = nil }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [CardServer.self]
+        let sdk = Inngame()
+        sdk.configure(api: APIClient(baseURL: URL(string: "https://api.test")!, appKey: key, token: "dev_t", session: URLSession(configuration: cfg)), monitorNetwork: false)
+        for _ in 0..<50 where sdk.messages.isEmpty { try await Task.sleep(nanoseconds: 20_000_000) }
+        let m = try XCTUnwrap(sdk.messages.first)
+        // No handler: nothing is claimed (the card stays disabled).
+        let none = await sdk.claimItem(m); XCTAssertFalse(none)
+        XCTAssertTrue(CardServer.claims.isEmpty)
+        var granted: [InngameItem] = []
+        Inngame.onItemGranted = { granted.append($0) }
+        let ok = await sdk.claimItem(m); XCTAssertTrue(ok)
+        XCTAssertEqual(granted, [InngameItem(messageId: "msg_item", id: "gems", name: "Gems", quantity: 50)])
+        XCTAssertEqual(sdk.messages.first?.parsedCard?.lastAction, "claimed")
+        let again = await sdk.claimItem(sdk.messages.first!); XCTAssertFalse(again, "never twice")
+        XCTAssertEqual(granted.count, 1)
+        XCTAssertGreaterThanOrEqual(CardServer.claims.first?.count ?? 0, 8, "nonce sent")
+
+        await sdk.send("", imageData: Data([0xFF, 0xD8, 0xFF]))
+        XCTAssertEqual(sdk.lastError, "Cette image ne peut pas être envoyée.", "the server's translated text, not a hard-coded English one")
     }
 }
